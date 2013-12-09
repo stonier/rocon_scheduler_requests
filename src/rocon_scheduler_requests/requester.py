@@ -62,7 +62,7 @@ from . import common
 from . import transitions
 
 
-class Requester:
+class Requester(object):
     """
     This class is used by a ROCON service to handle its resource
     requests.  When an instance of :class:`.Requester` is created, it
