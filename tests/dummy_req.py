@@ -5,7 +5,6 @@ from __future__ import absolute_import, print_function
 
 import rospy
 import uuid
-import unique_id
 import rocon_scheduler_requests.requester as requester
 import rocon_scheduler_requests.transitions as transitions
 
@@ -25,26 +24,29 @@ TEST_WILDCARD = Resource(name=TEST_RAPP,
 rid = None                      # UUID for Resource Request
 
 def feedback(rset):
-    print(str(rset))
+    #print(str(rset))
     if rid:
-        rq = rset[rid]
+        rq = rset.get(rid)
         if rq:
             if rq.msg.status == Request.WAITING:
-                print('Request queued')
+                print('Request queued: ' + str(rq.get_uuid()))
             elif rq.msg.status == Request.GRANTED:
-                print('Request granted: ' + str(rq))
-                rset[rid].release()
+                print('Request granted: ' + str(rq.get_uuid()))
+                rq.release()
             elif rq.msg.status == Request.RELEASING:
-                print('Request released')
+                print('Request released: ' + str(rq.get_uuid()))
         else:
-            print('Request freed.')
+            print('Request no longer active: ' + str(rid))
 
 if __name__ == '__main__':
 
     rospy.init_node("dummy_requester")
 
-    # Repeat allocation requests at 1Hz frequency, speeds up testing.
+    # Set heartbeat frequency to 1Hz, speeds up testing.
     rqr = requester.Requester(feedback, uuid=TEST_UUID, frequency=1.0)
+    rqr.send_requests()         # send empty request message
+
+    rospy.sleep(2.0)            # wait a while
 
     # Make a new request using a wildcard resource, and send it to the scheduler.
     rid = rqr.new_request([TEST_WILDCARD])

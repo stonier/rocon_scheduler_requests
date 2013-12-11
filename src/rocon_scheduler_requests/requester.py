@@ -59,7 +59,9 @@ from scheduler_msgs.msg import SchedulerRequests
 
 # internal modules
 from . import common
-from . import transitions
+from .transitions import RequestSet
+from .transitions import ResourceRequest
+from .transitions import WrongRequestError
 
 
 class Requester(object):
@@ -87,21 +89,23 @@ class Requester(object):
     :type frequency: float
 
     As long as the :class:`.Requester` object remains, it will
-    periodically send request messages to the scheduler, which will
-    provide feedback for them.  Those messages may be empty if no
-    requests are outstanding.  The caller-provided ``feedback`` function
-    will be invoked each time a feedback message arrives, like this:
+    periodically send request messages to the scheduler, even when no
+    requests are outstanding.  The scheduler will provide feedback for
+    them if anything has changed.  The caller-provided *feedback*
+    function will be invoked each time a feedback message arrives,
+    like this:
 
     .. describe:: feedback(rset)
 
-       :param rset: The current set of requests including possible
-                    updates from the scheduler.
+       :param rset: The current set of requests including any updates
+                    from the scheduler.
        :type rset: :class:`.RequestSet`
 
-    The ``feedback`` function is expected to iterate over its
+    The *feedback* function is expected to iterate over its
     :class:`.RequestSet`, checking the status of every
     :class:`.ResourceRequest` it contains, and modify them
-    appropriately.
+    appropriately.  If any changes occur, the scheduler will be
+    notified after this callback returns.
 
     """
 
@@ -115,7 +119,7 @@ class Requester(object):
             uuid = unique_id.fromRandom()
         self.requester_id = uuid
         """ :class:`uuid.UUID` of this requester. """
-        self.rset = transitions.RequestSet([], self.requester_id)
+        self.rset = RequestSet([], self.requester_id)
         """
         :class:`.RequestSet` containing the current status of every
         :class:`.ResourceRequest` made by this requester.  All
@@ -132,32 +136,29 @@ class Requester(object):
         self.sub = rospy.Subscriber(self.sub_topic,
                                     SchedulerRequests,
                                     self._feedback)
-        self.pub = rospy.Publisher(self.pub_topic, SchedulerRequests)
-        rospy.sleep(0.1)        # without this, first msg gets lost WTF???
+        self.pub = rospy.Publisher(self.pub_topic,
+                                   SchedulerRequests,
+                                   latch=True)
         self.time_delay = rospy.Duration(1.0 / frequency)
         self._set_timer()
 
     def _feedback(self, msg):
         """ Scheduler feedback message handler. """
-        # Make a new RequestSet of the scheduler replies from this message
-        new_rset = transitions.RequestSet(msg.requests,
-                                          self.requester_id,
-                                          replies=True)
-        self.rset.merge(new_rset)
+        new_rset = RequestSet(msg.requests, self.requester_id)
         prev_rset = copy.deepcopy(self.rset)
+        self.rset.merge(new_rset)
 
         # invoke user-defined callback function
         self.feedback(self.rset)
 
-        # :todo: reply immediately if callback changed something
-        #if self.rset != prev_rset:      # callback changed the rset?
-        #    self.send_requests()
+        if self.rset != prev_rset:      # msg or callback changed something?
+            self.send_requests()        # send new request immediately
 
     def _heartbeat(self, event):
         """ Scheduler request heartbeat timer handler.
 
         Triggered after nothing has been sent to the scheduler within
-        they previous time_delay duration.  Sends another copy of the
+        the previous time_delay duration.  Sends another copy of the
         current request set to the scheduler.
 
         """
@@ -165,6 +166,9 @@ class Requester(object):
 
     def new_request(self, resources, priority=None, uuid=None):
         """ Add a new scheduler request.
+
+        Call this method for each desired new request, then invoke
+        :py:meth:`.send_requests` to notify the scheduler.
 
         :param resources: ROCON resources requested
         :type resources: list of scheduler_msgs/Resource
@@ -185,16 +189,29 @@ class Requester(object):
         if uuid is None:
             uuid = unique_id.fromRandom()
         if uuid in self.rset:
-            raise transitions.WrongRequestError('UUID already in use.')
+            raise WrongRequestError('UUID already in use.')
         msg = Request(id=unique_id.toMsg(uuid),
                       priority=priority,
                       resources=resources,
                       status=Request.NEW)
-        self.rset[uuid] = transitions.ResourceRequest(msg)
+        self.rset[uuid] = ResourceRequest(msg)
         return uuid
 
     def send_requests(self):
-        """ Send all current requests to the scheduler. """
+        """ Send all current requests to the scheduler.
+
+        Use this method after calling :py:meth:`.new_request` one or
+        more times.  It will send them to the scheduler immediately.
+        Otherwise, they would not go out until the next heartbeat
+        timer event.
+
+        .. note::
+
+           A recent heartbeat may already have sent some recent
+           requests.  This method just ensures they are all sent
+           without further delay.
+
+        """
         #print(str(self.rset))
         self.pub.publish(self.rset.to_msg())
         #self._set_timer()       # reset heartbeat timer

@@ -288,13 +288,13 @@ class ResourceReply(RequestBase):
 
 class RequestSet:
     """
-    This class is a container for all the resource requests or replies
-    for a single requester.  It acts like a dictionary.
+    This class is a container for all the resource requests or
+    responses for a single requester.  It acts like a dictionary.
 
-    :param requests: list of ``Request`` messages, typically from the
+    :param requests: List of ``Request`` messages, typically from the
         ``requests`` component of a ``SchedulerRequests`` message.
     :param requester_id: (:class:`uuid.UUID`) Unique ID this requester.
-    :param replies: (bool) ``True`` if this set contains scheduler replies.
+    :param contents: Class from which to instantiate set members.
 
     :class:`.RequestSet` supports these standard container operations:
 
@@ -322,6 +322,12 @@ class RequestSet:
 
         Ignores the difference between request and reply messages.
 
+    .. describe:: rset != other
+
+       :returns: ``True`` if *rset* and *other* have different contents.
+
+        Ignores the difference between request and reply messages.
+
     .. describe:: str(rset)
 
        :returns: String representation of :class:`.RequestSet`.
@@ -338,18 +344,15 @@ class RequestSet:
 
     """
 
-    def __init__(self, requests, requester_id, replies=False):
+    def __init__(self, requests, requester_id, contents=ResourceRequest):
         """ Constructor. """
         self.requester_id = requester_id
         """ :class:`uuid.UUID` of this requester. """
-        self.replies = replies
-        """ True if this RequestSet contains scheduler replies. """
+        self.contents = contents
+        """ Type of objects this request set contains. """
         self.requests = {}
         for msg in requests:
-            if replies:
-                rq = ResourceReply(msg)
-            else:
-                rq = ResourceRequest(msg)
+            rq = self.contents(msg)
             self.requests[rq.get_uuid()] = rq
 
     def __contains__(self, uuid):
@@ -363,8 +366,20 @@ class RequestSet:
         if set(self.requests.keys()) != set(other.requests.keys()):
             return False        # different request IDs
         for rqid, rq in self.requests.items():
-            if rq.msg != other[rqid].msg:
-                return False    # contents of some request changed
+            ## this does not work:
+            #if rq.msg != other[rqid].msg:
+            #    return False    # contents of some request changed
+            other_msg = other[rqid].msg
+            if rq.msg.status != other_msg.status:
+                return False
+            if rq.msg.priority != other_msg.priority:
+                return False
+            if rq.msg.availability != other_msg.availability:
+                return False
+            if rq.msg.hold_time != other_msg.hold_time:
+                return False
+            if rq.msg.resources != other_msg.resources:
+                return False
         return True
 
     def __getitem__(self, uuid):
@@ -381,14 +396,16 @@ class RequestSet:
         """ Number of requests. """
         return len(self.requests)
 
+    def __ne__(self, other):
+        """ RequestSet != operator. """
+        return not self == other
+
     def __setitem__(self, uuid, rq):
         """ Add a resource request to the set. """
         self.requests[uuid] = rq
 
     def __str__(self):
-        rval = 'requester_id: ' + str(self.requester_id) \
-            + '\nreplies: ' + str(self.replies) \
-            + '\nrequests:'
+        rval = 'requester_id: ' + str(self.requester_id) + '\nrequests:'
         for rq in self.requests.values():
             rval += '\n  ' + str(rq)
         return rval
@@ -438,23 +455,34 @@ class RequestSet:
         :param updates: Request set containing updated information.
         :type updates: :class:`.RequestSet`
 
+        This is *not* a :py:meth:`set.update` or :py:meth:`set.union`
+        operation:
+
+        * New elements from the *updates* will be added.
+
+        * Existing elements will be reconciled with the corresponding
+          *updates* status.
+
+        * Any element reaching a terminal status known by both sides
+          of the protocol will be deleted.
+
         """
+        # Add any new requests not previously known.
+        for rid, new_rq in updates.items():
+            if rid not in self.requests:
+                self.requests[rid] = self.contents(new_rq.msg)
+
         # Reconcile each existing request with the updates.  Make a
         # copy of the dictionary items, so it can be altered in the loop.
         for rid, rq in self.requests.items():
             new_rq = updates.get(rid)
-            if new_rq is None and rq.msg.status == Request.RELEASED:
+            if ((rq.msg.status == Request.RELEASING and
+                    new_rq.msg.status == Request.RELEASED)
+                    or (rq.msg.status == Request.RELEASED and
+                        new_rq is None)):
                 del self.requests[rid]  # no longer needed
             else:
                 rq._reconcile(new_rq)
-
-        # Add any new requests not previously known.
-        for rid, new_rq in updates.items():
-            if rid not in self.requests:
-                if self.replies:
-                    self.requests[rid] = ResourceReply(new_rq.msg)
-                else:
-                    self.requests[rid] = ResourceRequest(new_rq.msg)
 
     def to_msg(self, stamp=None):
         """ Convert to ROS ``scheduler_msgs/SchedulerRequest`` message.
